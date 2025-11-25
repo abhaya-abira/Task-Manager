@@ -37,19 +37,24 @@
         background-color: #09090b;
         color: #f4f4f5;
       }
+      html {
+        scroll-behavior: smooth;
+      }
       /* Custom Scrollbar */
       ::-webkit-scrollbar {
         width: 8px;
+        height: 8px;
       }
       ::-webkit-scrollbar-track {
-        background: #09090b; 
+        background: #18181b; /* Surface color */
       }
       ::-webkit-scrollbar-thumb {
-        background: #27272a; 
+        background: #27272a; /* Border color */
         border-radius: 4px;
+        border: 2px solid #18181b; /* Creates padding effect */
       }
       ::-webkit-scrollbar-thumb:hover {
-        background: #3f3f46; 
+        background: #10b981; /* Primary accent on hover */
       }
     </style>
   <script type="importmap">

@@ -47,24 +47,9 @@ const INITIAL_PILLARS: Pillar[] = [
 
 const getTodayDateString = () => new Date().toISOString().split('T')[0];
 
-const getInitialState = (): AppState => {
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored) {
-    try {
-      const parsed = JSON.parse(stored);
-      // Migration: Add new fields if missing
-      return {
-        pillars: parsed.pillars || INITIAL_PILLARS,
-        generalTasks: parsed.generalTasks || [],
-        overflowTasks: parsed.overflowTasks || [],
-        streak: parsed.streak || 0,
-        lastCompletedDate: parsed.lastCompletedDate || null,
-        lastActiveDate: parsed.lastActiveDate || getTodayDateString(),
-      };
-    } catch (e) {
-      console.error('Failed to parse local storage', e);
-    }
-  }
+// FIX: Initial state function no longer reads from localStorage directly
+// This prevents Hydration Mismatch in SSR/Next.js contexts and ensures stability.
+const getSafeInitialState = (): AppState => {
   return {
     pillars: INITIAL_PILLARS,
     generalTasks: [],
@@ -78,78 +63,109 @@ const getInitialState = (): AppState => {
 type ViewMode = 'dashboard' | 'overflow';
 
 export default function App() {
-  const [state, setState] = useState<AppState>(getInitialState);
+  // FIX: Separate 'isLoaded' state to ensure we don't render/save before hydration
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [state, setState] = useState<AppState>(getSafeInitialState);
+  
   const [viewMode, setViewMode] = useState<ViewMode>('dashboard');
   const [openPillarId, setOpenPillarId] = useState<string | null>(null);
   const [generalInput, setGeneralInput] = useState('');
   const [showCelebration, setShowCelebration] = useState(false);
 
-  // Midnight Audit & Persistence
+  // FIX: Hydration & Midnight Audit Effect
+  // This runs ONLY on the client after mount.
   useEffect(() => {
-    const performMidnightAudit = () => {
-      const today = getTodayDateString();
-      
-      // If today is different from last active date, run audit
-      if (state.lastActiveDate !== today) {
-        console.log("Running Midnight Audit...");
+    const hydrateAndAudit = () => {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        const today = getTodayDateString();
         
-        const newOverflowTasks: OverflowTask[] = [];
+        let loadedState: AppState = getSafeInitialState();
 
-        // 1. Harvest Uncompleted Pillar Tasks
-        state.pillars.forEach(pillar => {
-          pillar.tasks.forEach(task => {
-            if (!task.completed) {
-              newOverflowTasks.push({
-                id: crypto.randomUUID(),
-                text: task.text,
-                originPillarTitle: pillar.title,
-                dateMissed: state.lastActiveDate, // The date it was SUPPOSED to be done
-                createdAt: Date.now()
-              });
+        // 1. Load Data safely
+        if (stored) {
+            try {
+                const parsed = JSON.parse(stored);
+                // Merge loaded data with default structure to prevent missing fields (Migration safety)
+                loadedState = { 
+                    ...loadedState, 
+                    ...parsed,
+                    // Ensure pillars structure is preserved even if empty in storage
+                    pillars: parsed.pillars || INITIAL_PILLARS 
+                };
+            } catch (e) {
+                console.error('Failed to parse local storage', e);
+                // Fallback to default loadedState if corrupt
             }
-          });
-        });
+        }
 
-        // 2. Harvest Uncompleted General Tasks
-        state.generalTasks.forEach(task => {
-            if (!task.completed) {
-                newOverflowTasks.push({
-                    id: crypto.randomUUID(),
-                    text: task.text,
-                    originPillarTitle: 'General',
-                    dateMissed: state.lastActiveDate,
-                    createdAt: Date.now()
+        // 2. Perform Midnight Audit Check
+        // Logic: If the last active date recorded in storage is NOT today, trigger the audit.
+        if (loadedState.lastActiveDate !== today) {
+            console.log("Running Midnight Audit...");
+            
+            const newOverflowTasks: OverflowTask[] = [];
+
+            // A. Harvest Uncompleted Pillar Tasks
+            loadedState.pillars.forEach(pillar => {
+                pillar.tasks.forEach(task => {
+                    if (!task.completed) {
+                        newOverflowTasks.push({
+                            id: crypto.randomUUID(),
+                            text: task.text,
+                            originPillarTitle: pillar.title,
+                            dateMissed: loadedState.lastActiveDate,
+                            createdAt: Date.now()
+                        });
+                    }
                 });
-            }
-        });
+            });
 
-        // 3. Update State: Add overflow, Reset pillars/general, Update date
-        setState(prev => ({
-          ...prev,
-          overflowTasks: [...newOverflowTasks, ...prev.overflowTasks],
-          // Reset Pillar Tasks (Uncheck all)
-          pillars: prev.pillars.map(p => ({
-            ...p,
-            tasks: p.tasks.map(t => ({ ...t, completed: false }))
-          })),
-          // Reset General Tasks (Uncheck all)
-          generalTasks: prev.generalTasks.map(t => ({ ...t, completed: false })),
-          lastActiveDate: today,
-          // Note: Streak is handled separately in the next effect
-        }));
-      }
+            // B. Harvest Uncompleted General Tasks
+            loadedState.generalTasks.forEach(task => {
+                if (!task.completed) {
+                    newOverflowTasks.push({
+                        id: crypto.randomUUID(),
+                        text: task.text,
+                        originPillarTitle: 'General',
+                        dateMissed: loadedState.lastActiveDate,
+                        createdAt: Date.now()
+                    });
+                }
+            });
+
+            // C. Apply Changes: Move to overflow, Reset pillars, Update Date
+            loadedState = {
+                ...loadedState,
+                overflowTasks: [...newOverflowTasks, ...loadedState.overflowTasks],
+                pillars: loadedState.pillars.map(p => ({
+                    ...p,
+                    tasks: p.tasks.map(t => ({ ...t, completed: false }))
+                })),
+                generalTasks: loadedState.generalTasks.map(t => ({ ...t, completed: false })),
+                lastActiveDate: today
+            };
+        }
+
+        // 3. Set Final State & Mark as Loaded
+        setState(loadedState);
+        setIsLoaded(true);
     };
 
-    performMidnightAudit();
-  }, []); // Run once on mount
+    hydrateAndAudit();
+  }, []);
 
-  // Save to LocalStorage whenever state changes
+  // FIX: Persistence Effect
+  // Only save if app is fully loaded to prevent overwriting storage with empty initial state
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [state]);
+    if (isLoaded) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+  }, [state, isLoaded]);
 
   // Streak & Celebration Logic
   useEffect(() => {
+    if (!isLoaded) return; // Wait for load
+
     const allPillarTasks = state.pillars.flatMap(p => p.tasks);
     const allTasks = [...allPillarTasks, ...state.generalTasks];
     const totalTasks = allTasks.length;
@@ -174,7 +190,7 @@ export default function App() {
     } else {
       setShowCelebration(false);
     }
-  }, [state.pillars, state.generalTasks]); // Re-run when tasks change
+  }, [state.pillars, state.generalTasks, isLoaded]);
 
   // Derived Stats
   const allPillarTasks = state.pillars.flatMap(p => p.tasks);
@@ -259,6 +275,24 @@ export default function App() {
   const handleTogglePillarOpen = (id: string) => {
     setOpenPillarId(prev => prev === id ? null : id);
   };
+
+  // Render Loading State to prevent layout shift
+  if (!isLoaded) {
+    return (
+        <div className="min-h-screen bg-background text-text flex items-center justify-center">
+            <motion.div 
+                initial={{ opacity: 0 }} 
+                animate={{ opacity: 1 }} 
+                className="flex flex-col items-center gap-4"
+            >
+                <div className="w-12 h-12 rounded-2xl border border-primary/20 flex items-center justify-center animate-pulse">
+                    <Infinity size={24} className="text-primary/50" />
+                </div>
+                <p className="text-xs text-textMuted font-mono tracking-widest">INITIALIZING...</p>
+            </motion.div>
+        </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background text-text font-sans selection:bg-primary/30 selection:text-primary pb-20 overflow-x-hidden">
